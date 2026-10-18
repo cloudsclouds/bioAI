@@ -9,44 +9,78 @@
 
 ## 系统总览
 
-```mermaid
-flowchart LR
-    U[科研用户] --> API[FastAPI 接入层]
-    API --> G[请求治理与链路 Hook<br/>权限校验 / 缓存 / 重试 / 审计]
-    G --> MEM[记忆上下文装配]
-    MEM <--> R[(Redis<br/>会话工作记忆 / 计划 / 中间结果)]
-    MEM <--> C[(ChromaDB<br/>历史摘要 / 研究偏好 / 知识库)]
-    MEM --> I[细粒度意图识别<br/>Few-shot LLM + Embedding + Pattern]
-    I -->|知识问答| A[主 Agent / Orchestrator]
-    I -->|关联预测| A
-    I -->|复杂研究任务| A
-    I -->|需人工处理| H[转人工 / 澄清]
+```text
+[科研用户]
+      |
+      v
+[FastAPI 接入层]
+      |
+      v
+[请求治理与链路 Hook]
+  权限校验 / 缓存 / 重试 / 审计
+      |
+      v
+[记忆上下文装配] <------> [Redis]
+      |                    会话工作记忆 / 计划 / 中间结果
+      |
+      +------------------> [ChromaDB]
+      |                    历史摘要 / 研究偏好 / 知识库
+      v
+[细粒度意图识别]
+  Few-shot LLM + Embedding + Pattern
+      |
+      +-- 知识问答 ------+
+      +-- 关联预测 ------+--> [主 Agent / Orchestrator]
+      +-- 复杂研究任务 --+
+      |
+      +-- 需人工处理 --> [转人工 / 澄清]
 
-    A --> P[任务规划与状态管理]
-    P --> S[动态 Skills 注入]
-    P --> SUB[辅 Agent / 专项执行器]
-    SUB -->|知识增强| Q[RAG 检索管线]
-    Q --> C
-    Q -->|并行子查询 / 去重 / 重排| SUB
-    SUB -->|工具请求| MCP[MCP 工具路由]
-    MCP --> T1[miRNA-drug 预测与关联分数]
-    MCP --> T2[fetch-web 信息获取]
-    MCP --> T3[测试报告生成]
-    S --> SUB
-    SUB --> BOX[OpenSandbox 主机-沙箱双层访问平面]
-    BOX -->|隔离网络 / 进程 / 文件系统| EXEC[代码脚本与高风险 Skill 执行]
-    T1 --> V[结果校验与证据汇总]
-    T2 --> V
-    T3 --> V
-    Q --> V
-    V -->|状态更新| P
-    V --> RESP[回答 / 结构化结果 / 报告]
-    RESP --> API
-    RESP --> J[LLM-as-Judge 端到端评测]
-    G -.模型 / 工具 / 文件 / 状态事件.-> TRACE[链路追踪、敏感操作拦截与审计]
-    P -.任务状态事件.-> TRACE
-    MCP -.工具事件.-> TRACE
-    BOX -.文件与执行事件.-> TRACE
+[主 Agent / Orchestrator]
+      |
+      v
+[任务规划与状态管理]
+      |
+      +--> [动态 Skills 注入] --------+
+      |                              |
+      +--> [辅 Agent / 专项执行器] <--+
+                    |
+                    +-- 知识增强 --> [RAG 检索管线] --> [ChromaDB]
+                    |                     |
+                    |                     +-- 并行子查询 / 去重 / 重排 --+
+                    |                                                       |
+                    +<----------------------------------------------------+
+                    |
+                    +-- 工具请求 --> [MCP 工具路由]
+                                      |
+                                      +--> [miRNA-drug 预测与关联分数]
+                                      +--> [fetch-web 信息获取]
+                                      +--> [测试报告生成]
+                    |
+                    +--> [OpenSandbox 主机-沙箱双层访问平面]
+                                      |
+                                      +-- 隔离网络 / 进程 / 文件系统 --> [代码脚本与高风险 Skill 执行]
+
+[miRNA-drug 预测] --------+
+[fetch-web 信息] ---------+--> [结果校验与证据汇总] --> [任务规划与状态管理]
+[测试报告生成] ----------+
+[RAG 检索管线] ----------+
+                                      |
+                                      v
+                         [回答 / 结构化结果 / 报告]
+                                      |
+                         +------------+------------+
+                         |                         |
+                         v                         v
+                 [FastAPI 返回用户]       [LLM-as-Judge 端到端评测]
+
+[请求治理与链路 Hook]
+      -. 模型 / 工具 / 文件 / 状态事件 .-> [链路追踪、敏感操作拦截与审计]
+[任务规划与状态管理]
+      -. 任务状态事件 ---------------> [链路追踪、敏感操作拦截与审计]
+[MCP 工具路由]
+      -. 工具事件 -------------------> [链路追踪、敏感操作拦截与审计]
+[OpenSandbox]
+      -. 文件与执行事件 -------------> [链路追踪、敏感操作拦截与审计]
 ```
 
 ### 架构职责
@@ -64,54 +98,98 @@ flowchart LR
 
 ## Agent 详细执行流程
 
-```mermaid
-flowchart TD
-    START([收到用户请求]) --> LOAD[读取会话工作记忆与历史偏好]
-    LOAD --> CLASSIFY[意图识别与实体抽取<br/>语义 Few-shot / Embedding / Pattern 融合]
-    CLASSIFY --> ROUTE{路由决策}
-    ROUTE -->|缺少关键实体| CLARIFY[生成澄清问题]
-    ROUTE -->|知识问答| PLAN
-    ROUTE -->|miRNA-drug 预测| PLAN
-    ROUTE -->|复合研究任务| PLAN
-    ROUTE -->|需人工处理| HUMAN[转人工]
+```text
+[收到用户请求]
+      |
+      v
+[读取会话工作记忆与历史偏好]
+      |
+      v
+[意图识别与实体抽取]
+  语义 Few-shot / Embedding / Pattern 融合
+      |
+      v
+{路由决策}
+      |
+      +-- 缺少关键实体 --> [生成澄清问题]
+      +-- 需人工处理 ----> [转人工]
+      +-- 知识问答 ------+
+      +-- miRNA-drug 预测 +--> [主 Agent 制定依赖任务清单]
+      +-- 复合研究任务 --+
+                                  |
+                                  v
+                 [保存任务与状态]
+                 pending / in_progress / completed / failed
+                                  |
+                                  v
+                 [选取依赖已满足的待执行子任务]
+                                  |
+                                  v
+                 [按任务动态注入 Skills]
+                                  |
+                                  v
+                           {子任务类型}
+                                  |
+             +--------------------+--------------------+
+             |                    |                    |
+             v                    v                    v
+     [领域知识]            [预测 / 查询]          [网页信息]
+             |                    |                    |
+             v                    v                    v
+ [构造多角度子查询]     [调用 MCP 预测工具]    [调用 MCP fetch-web]
+             |                    |                    |
+             v                    v                    v
+ [并行检索 ChromaDB]    [校验参数与返回结构]  [整理来源与相关信息]
+             |                    |                    |
+             v                    +--------------------+
+ [内容哈希与相似度去重]                         |
+             |                                   |
+             v                                   |
+ [LLM 重排与证据整理]                            |
+             |                                   |
+             +------------------+----------------+
+                                |
+                                v
+                    [子任务结果与证据]
+                                |
+                                v
+             [写入 Redis 中间结果并更新任务状态]
+                                |
+                                v
+                    {还有可执行子任务?}
+                         |                 |
+                  有 ----+                 +---- 无
+                  |                              |
+                  +--> [选取下一个子任务]         v
+                               |       [主 Agent 汇总并校验完整性 / 一致性]
+                               |                    |
+                               +--------------------+
+                                                    |
+                                                    v
+                                      {证据充分且任务成功?}
+                                          |             |
+                                否 --------+             +-------- 是
+                                |                                    |
+                                v                                    v
+                 [有限重试 / 调整计划 / 请求澄清]       [生成回答或结构化报告]
+                                |                                    |
+                                +--> [保存任务与状态]                v
+                                                   [更新会话记忆]
+                                                   提炼摘要与研究偏好
+                                                              |
+                                                              v
+                                              [LLM-as-Judge 端到端评测]
+                                                              |
+                                                              v
+                                           [返回结果并记录评测与审计事件]
 
-    PLAN[主 Agent 制定依赖任务清单] --> STATE[保存任务与状态<br/>pending / in_progress / completed / failed]
-    STATE --> NEXT[选取依赖已满足的待执行子任务]
-    NEXT --> SKILL[按任务动态注入 Skills]
-    SKILL --> KIND{子任务类型}
-    KIND -->|领域知识| RAG
-    KIND -->|预测 / 查询| TOOL
-    KIND -->|网页信息| WEB
-    KIND -->|报告生成| REPORT
+[报告生成任务] --> [调用 MCP 报告工具]
+[高风险 Skill / 脚本] --> [OpenSandbox 隔离执行]
+[调用 MCP 报告工具] --> [OpenSandbox 隔离执行]
+[OpenSandbox] --> [校验文件访问与执行结果] --> [子任务结果与证据]
 
-    RAG[构造多角度子查询] --> PAR[并行检索 ChromaDB]
-    PAR --> DEDUP[内容哈希与相似度去重]
-    DEDUP --> RERANK[LLM 重排与证据整理]
-    TOOL[调用 MCP 预测工具] --> TOOLCHK[校验参数与返回结构]
-    WEB[调用 MCP fetch-web] --> WEBCHK[整理来源与相关信息]
-    REPORT[调用 MCP 报告工具] --> SANDBOX
-    SKILL -.高风险 Skill / 脚本.-> SANDBOX[OpenSandbox 隔离执行]
-    SANDBOX --> SANDBOXCHK[校验文件访问与执行结果]
-
-    RERANK --> RESULT[子任务结果与证据]
-    TOOLCHK --> RESULT
-    WEBCHK --> RESULT
-    SANDBOXCHK --> RESULT
-    RESULT --> SAVE[写入 Redis 中间结果并更新任务状态]
-    SAVE --> MORE{还有可执行子任务?}
-    MORE -->|有| NEXT
-    MORE -->|无| VALIDATE[主 Agent 汇总并校验完整性 / 一致性]
-    VALIDATE -->|证据不足或任务失败| RECOVER[有限重试 / 调整计划 / 请求澄清]
-    RECOVER --> STATE
-    VALIDATE -->|通过| ANSWER[生成面向用户的回答或结构化报告]
-    ANSWER --> MEMORY[更新会话工作记忆；提炼摘要与研究偏好]
-    MEMORY --> EVAL[LLM-as-Judge 评估相关性 / 准确性 / 完整性 / 有用性]
-    EVAL --> END([返回结果并记录评测与审计事件])
-
-    TRACE[链路 Hook：模型调用 / 工具调用 / 文件读写 / 状态变更] -.观测与治理.-> CLASSIFY
-    TRACE -.观测与治理.-> TOOL
-    TRACE -.观测与治理.-> SANDBOX
-    TRACE -.观测与治理.-> SAVE
+[链路 Hook]
+      -. 模型调用 / 工具调用 / 文件读写 / 状态变更 .-> [观测、缓存、重试、权限校验与审计]
 ```
 
 ## 核心模块
@@ -171,13 +249,18 @@ flowchart TD
 
 ## 部署形态
 
-```mermaid
-flowchart LR
-    CLIENT[客户端] --> DOCKER[Docker 部署]
-    DOCKER --> API[Python / FastAPI 服务]
-    API --> LLM[Claude / DeepSeek Compatible API]
-    API --> REDIS[(Redis)]
-    API --> CHROMA[(ChromaDB)]
-    API --> MCP[MCP 工具服务]
-    API --> SB[OpenSandbox]
+```text
+[客户端]
+    |
+    v
+[Docker 部署]
+    |
+    v
+[Python / FastAPI 服务]
+    |
+    +--> [Claude / DeepSeek Compatible API]
+    +--> [Redis]
+    +--> [ChromaDB]
+    +--> [MCP 工具服务]
+    +--> [OpenSandbox]
 ```
